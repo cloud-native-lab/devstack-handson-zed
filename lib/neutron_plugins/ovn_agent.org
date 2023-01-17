@@ -244,12 +244,11 @@ function _run_process {
     local cmd="$2"
     local stop_cmd="$3"
     local group=$4
-    local user=$5
-    local rundir=${6:-$OVS_RUNDIR}
+    local user=${5:-$STACK_USER}
 
     local systemd_service="devstack@$service.service"
     local unit_file="$SYSTEMD_DIR/$systemd_service"
-    local environment="OVN_RUNDIR=$OVN_RUNDIR OVN_DBDIR=$OVN_DATADIR OVN_LOGDIR=$LOGDIR OVS_RUNDIR=$OVS_RUNDIR OVS_DBDIR=$OVS_DATADIR OVS_LOGDIR=$LOGDIR"
+    local environment="OVN_RUNDIR=$OVS_RUNDIR OVN_DBDIR=$OVN_DATADIR OVN_LOGDIR=$LOGDIR OVS_RUNDIR=$OVS_RUNDIR OVS_DBDIR=$OVS_DATADIR OVS_LOGDIR=$LOGDIR"
 
     echo "Starting $service executed command": $cmd
 
@@ -265,14 +264,14 @@ function _run_process {
 
     _start_process $systemd_service
 
-    local testcmd="test -e $rundir/$service.pid"
+    local testcmd="test -e $OVS_RUNDIR/$service.pid"
     test_with_retry "$testcmd" "$service did not start" $SERVICE_TIMEOUT 1
     local service_ctl_file
-    service_ctl_file=$(ls $rundir | grep $service | grep ctl)
+    service_ctl_file=$(ls $OVS_RUNDIR | grep $service | grep ctl)
     if [ -z "$service_ctl_file" ]; then
         die $LINENO "ctl file for service $service is not present."
     fi
-    sudo ovs-appctl -t $rundir/$service_ctl_file vlog/set console:off syslog:info file:info
+    sudo ovs-appctl -t $OVS_RUNDIR/$service_ctl_file vlog/set console:off syslog:info file:info
 }
 
 function clone_repository {
@@ -348,7 +347,7 @@ function compile_ovn {
 
 # OVN service sanity check
 function ovn_sanity_check {
-    if is_service_enabled q-agt neutron-agent; then
+    if is_service_enabled q-agt neutron-agt; then
         die $LINENO "The q-agt/neutron-agt service must be disabled with OVN."
     elif is_service_enabled q-l3 neutron-l3; then
         die $LINENO "The q-l3/neutron-l3 service must be disabled with OVN."
@@ -371,6 +370,10 @@ function install_ovn {
 
     sudo mkdir -p $OVS_RUNDIR
     sudo chown $(whoami) $OVS_RUNDIR
+    # NOTE(lucasagomes): To keep things simpler, let's reuse the same
+    # RUNDIR for both OVS and OVN. This way we avoid having to specify the
+    # --db option in the ovn-{n,s}bctl commands while playing with DevStack
+    sudo ln -s $OVS_RUNDIR $OVN_RUNDIR
 
     if [[ "$OVN_BUILD_FROM_SOURCE" == "True" ]]; then
         # If OVS is already installed, remove it, because we're about to
@@ -461,7 +464,7 @@ function filter_network_api_extensions {
 function configure_ovn_plugin {
     echo "Configuring Neutron for OVN"
 
-    if is_service_enabled q-svc neutron-api; then
+    if is_service_enabled q-svc ; then
         filter_network_api_extensions
         populate_ml2_config /$Q_PLUGIN_CONF_FILE ml2_type_geneve max_header_size=$OVN_GENEVE_OVERHEAD
         populate_ml2_config /$Q_PLUGIN_CONF_FILE ovn ovn_nb_connection="$OVN_NB_REMOTE"
@@ -485,7 +488,7 @@ function configure_ovn_plugin {
             inicomment /$Q_PLUGIN_CONF_FILE network_log local_output_log_base="$Q_LOG_DRIVER_LOG_BASE"
         fi
 
-        if is_service_enabled q-ovn-metadata-agent neutron-ovn-metadata-agent; then
+        if is_service_enabled q-ovn-metadata-agent; then
             populate_ml2_config /$Q_PLUGIN_CONF_FILE ovn ovn_metadata_enabled=True
         else
             populate_ml2_config /$Q_PLUGIN_CONF_FILE ovn ovn_metadata_enabled=False
@@ -506,7 +509,7 @@ function configure_ovn_plugin {
     fi
 
     if is_service_enabled n-api-meta ; then
-        if is_service_enabled q-ovn-metadata-agent neutron-ovn-metadata-agent; then
+        if is_service_enabled q-ovn-metadata-agent ; then
             iniset $NOVA_CONF neutron service_metadata_proxy True
         fi
     fi
@@ -539,7 +542,7 @@ function configure_ovn {
     fi
 
     # Metadata
-    if is_service_enabled q-ovn-metadata-agent neutron-ovn-metadata-agent && is_service_enabled ovn-controller; then
+    if is_service_enabled q-ovn-metadata-agent && is_service_enabled ovn-controller; then
         sudo install -d -o $STACK_USER $NEUTRON_CONF_DIR
 
         mkdir -p $NEUTRON_DIR/etc/neutron/plugins/ml2
@@ -551,7 +554,7 @@ function configure_ovn {
         iniset $OVN_META_CONF DEFAULT debug $ENABLE_DEBUG_LOG_LEVEL
         iniset $OVN_META_CONF DEFAULT nova_metadata_host $OVN_META_DATA_HOST
         iniset $OVN_META_CONF DEFAULT metadata_workers $API_WORKERS
-        iniset $OVN_META_CONF DEFAULT state_path $DATA_DIR/neutron
+        iniset $OVN_META_CONF DEFAULT state_path $NEUTRON_STATE_PATH
         iniset $OVN_META_CONF ovs ovsdb_connection tcp:$OVSDB_SERVER_LOCAL_HOST:6640
         iniset $OVN_META_CONF ovn ovn_sb_connection $OVN_SB_REMOTE
         if is_service_enabled tls-proxy; then
@@ -587,7 +590,6 @@ function init_ovn {
     rm -f $OVS_DATADIR/.*.db.~lock~
     sudo rm -f $OVN_DATADIR/*.db
     sudo rm -f $OVN_DATADIR/.*.db.~lock~
-    sudo rm -f $OVN_RUNDIR/*.sock
 }
 
 function _start_ovs {
@@ -614,12 +616,12 @@ function _start_ovs {
                 dbcmd+=" --remote=db:hardware_vtep,Global,managers $OVS_DATADIR/vtep.db"
             fi
             dbcmd+=" $OVS_DATADIR/conf.db"
-            _run_process ovsdb-server "$dbcmd" "" "$STACK_GROUP" "root" "$OVS_RUNDIR"
+            _run_process ovsdb-server "$dbcmd" "" "$STACK_GROUP" "root"
 
             # Note: ovn-controller will create and configure br-int once it is started.
             # So, no need to create it now because nothing depends on that bridge here.
             local ovscmd="$OVS_SBINDIR/ovs-vswitchd --log-file --pidfile --detach"
-            _run_process ovs-vswitchd "$ovscmd" "" "$STACK_GROUP" "root" "$OVS_RUNDIR"
+            _run_process ovs-vswitchd "$ovscmd" "" "$STACK_GROUP" "root"
         else
             _start_process "$OVSDB_SERVER_SERVICE"
             _start_process "$OVS_VSWITCHD_SERVICE"
@@ -658,7 +660,7 @@ function _start_ovs {
 
             enable_service ovs-vtep
             local vtepcmd="$OVS_SCRIPTDIR/ovs-vtep --log-file --pidfile --detach br-v"
-            _run_process ovs-vtep "$vtepcmd" "" "$STACK_GROUP" "root" "$OVS_RUNDIR"
+            _run_process ovs-vtep "$vtepcmd" "" "$STACK_GROUP" "root"
 
             vtep-ctl set-manager tcp:$HOST_IP:6640
         fi
@@ -681,7 +683,7 @@ function _start_ovn_services {
     if is_service_enabled ovs-vtep ; then
         _start_process "devstack@ovs-vtep.service"
     fi
-    if is_service_enabled q-ovn-metadata-agent neutron-ovn-metadata-agent ; then
+    if is_service_enabled q-ovn-metadata-agent; then
         _start_process "devstack@q-ovn-metadata-agent.service"
     fi
 }
@@ -702,26 +704,26 @@ function start_ovn {
             local cmd="/bin/bash $SCRIPTDIR/ovn-ctl --no-monitor start_northd"
             local stop_cmd="/bin/bash $SCRIPTDIR/ovn-ctl stop_northd"
 
-            _run_process ovn-northd "$cmd" "$stop_cmd" "$STACK_GROUP" "root" "$OVN_RUNDIR"
+            _run_process ovn-northd "$cmd" "$stop_cmd" "$STACK_GROUP" "root"
         else
             _start_process "$OVN_NORTHD_SERVICE"
         fi
 
         # Wait for the service to be ready
         # Check for socket and db files for both OVN NB and SB
-        wait_for_sock_file $OVN_RUNDIR/ovnnb_db.sock
-        wait_for_sock_file $OVN_RUNDIR/ovnsb_db.sock
+        wait_for_sock_file $OVS_RUNDIR/ovnnb_db.sock
+        wait_for_sock_file $OVS_RUNDIR/ovnsb_db.sock
         wait_for_db_file $OVN_DATADIR/ovnnb_db.db
         wait_for_db_file $OVN_DATADIR/ovnsb_db.db
 
         if is_service_enabled tls-proxy; then
-            sudo ovn-nbctl --db=unix:$OVN_RUNDIR/ovnnb_db.sock set-ssl $INT_CA_DIR/private/$DEVSTACK_CERT_NAME.key $INT_CA_DIR/$DEVSTACK_CERT_NAME.crt $INT_CA_DIR/ca-chain.pem
-            sudo ovn-sbctl --db=unix:$OVN_RUNDIR/ovnsb_db.sock set-ssl $INT_CA_DIR/private/$DEVSTACK_CERT_NAME.key $INT_CA_DIR/$DEVSTACK_CERT_NAME.crt $INT_CA_DIR/ca-chain.pem
+            sudo ovn-nbctl --db=unix:$OVS_RUNDIR/ovnnb_db.sock set-ssl $INT_CA_DIR/private/$DEVSTACK_CERT_NAME.key $INT_CA_DIR/$DEVSTACK_CERT_NAME.crt $INT_CA_DIR/ca-chain.pem
+            sudo ovn-sbctl --db=unix:$OVS_RUNDIR/ovnsb_db.sock set-ssl $INT_CA_DIR/private/$DEVSTACK_CERT_NAME.key $INT_CA_DIR/$DEVSTACK_CERT_NAME.crt $INT_CA_DIR/ca-chain.pem
         fi
-        sudo ovn-nbctl --db=unix:$OVN_RUNDIR/ovnnb_db.sock set-connection p${OVN_PROTO}:6641:$SERVICE_LISTEN_ADDRESS -- set connection . inactivity_probe=60000
-        sudo ovn-sbctl --db=unix:$OVN_RUNDIR/ovnsb_db.sock set-connection p${OVN_PROTO}:6642:$SERVICE_LISTEN_ADDRESS -- set connection . inactivity_probe=60000
-        sudo ovs-appctl -t $OVN_RUNDIR/ovnnb_db.ctl vlog/set console:off syslog:$OVN_DBS_LOG_LEVEL file:$OVN_DBS_LOG_LEVEL
-        sudo ovs-appctl -t $OVN_RUNDIR/ovnsb_db.ctl vlog/set console:off syslog:$OVN_DBS_LOG_LEVEL file:$OVN_DBS_LOG_LEVEL
+        sudo ovn-nbctl --db=unix:$OVS_RUNDIR/ovnnb_db.sock set-connection p${OVN_PROTO}:6641:$SERVICE_LISTEN_ADDRESS -- set connection . inactivity_probe=60000
+        sudo ovn-sbctl --db=unix:$OVS_RUNDIR/ovnsb_db.sock set-connection p${OVN_PROTO}:6642:$SERVICE_LISTEN_ADDRESS -- set connection . inactivity_probe=60000
+        sudo ovs-appctl -t $OVS_RUNDIR/ovnnb_db.ctl vlog/set console:off syslog:$OVN_DBS_LOG_LEVEL file:$OVN_DBS_LOG_LEVEL
+        sudo ovs-appctl -t $OVS_RUNDIR/ovnsb_db.ctl vlog/set console:off syslog:$OVN_DBS_LOG_LEVEL file:$OVN_DBS_LOG_LEVEL
     fi
 
     if is_service_enabled ovn-controller ; then
@@ -729,7 +731,7 @@ function start_ovn {
             local cmd="/bin/bash $SCRIPTDIR/ovn-ctl --no-monitor start_controller"
             local stop_cmd="/bin/bash $SCRIPTDIR/ovn-ctl stop_controller"
 
-            _run_process ovn-controller "$cmd" "$stop_cmd" "$STACK_GROUP" "root" "$OVN_RUNDIR"
+            _run_process ovn-controller "$cmd" "$stop_cmd" "$STACK_GROUP" "root"
         else
             _start_process "$OVN_CONTROLLER_SERVICE"
         fi
@@ -738,13 +740,13 @@ function start_ovn {
     if is_service_enabled ovn-controller-vtep ; then
         if [[ "$OVN_BUILD_FROM_SOURCE" == "True" ]]; then
             local cmd="$OVS_BINDIR/ovn-controller-vtep --log-file --pidfile --detach --ovnsb-db=$OVN_SB_REMOTE"
-            _run_process ovn-controller-vtep "$cmd" "" "$STACK_GROUP" "root" "$OVN_RUNDIR"
+            _run_process ovn-controller-vtep "$cmd" "" "$STACK_GROUP" "root"
         else
             _start_process "$OVN_CONTROLLER_VTEP_SERVICE"
         fi
     fi
 
-    if is_service_enabled q-ovn-metadata-agent neutron-ovn-metadata-agent; then
+    if is_service_enabled q-ovn-metadata-agent; then
         run_process q-ovn-metadata-agent "$NEUTRON_OVN_BIN_DIR/$NEUTRON_OVN_METADATA_BINARY --config-file $OVN_META_CONF"
         # Format logging
         setup_logging $OVN_META_CONF
@@ -768,7 +770,7 @@ function _stop_process {
 }
 
 function stop_ovn {
-    if is_service_enabled q-ovn-metadata-agent neutron-ovn-metadata-agent; then
+    if is_service_enabled q-ovn-metadata-agent; then
         sudo pkill -9 -f haproxy || :
         _stop_process "devstack@q-ovn-metadata-agent.service"
     fi

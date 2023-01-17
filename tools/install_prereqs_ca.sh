@@ -3,16 +3,17 @@
 sudo apt-get install -y apache2 augeas-lenses autoconf automake autopoint autotools-dev \
 bridge-utils libxen-dev qemu-slof qemu-system-arm qemu-system-mips qemu-system-misc qemu-system-ppc qemu-system-s390x qemu-system-sparc \
 bcache-tools bind9-host binfmt-support build-essential libvirt-daemon libvirt-clients libvirt-daemon-system libvirt-dev \
-comerr-dev conntrack conntrackd cpio cpp cpu-checker dstat eject socat memcached \
+comerr-dev conntrack conntrackd cpio cpp cpu-checker eject socat memcached \
 rabbitmq-server sharutils vim unzip sysfsutils python3-distutils python3-dev python-pip-whl pcp \
-debootstrap ovn-central ovn-common ovn-controller-vtep ovn-host
+debootstrap ovn-central ovn-common ovn-controller-vtep ovn-host golang golang-1.13 \
+mecab-ipadic mecab-ipadic-utf8 mecab-utils mysql-client-8.0 mysql-client-core-8.0 mysql-server mysql-server-8.0 mysql-server-core-8.0 \
+apparmor-utils python3-apparmor python3-libapparmor
 
 sudo rm -rf /usr/lib/python3/dist-packages/PyYAML-*.egg-info
 
 # for Zed
 sudo /usr/bin/pip install \
 cliff==4.0.0 \
-cryptography==36.0.2 \
 libvirt-python==6.1.0 \
 numpy==1.23.2 \
 os-brick==6.1.0 \
@@ -78,4 +79,9 @@ python-troveclient==8.0.0 \
 python-vitrageclient==4.6.0 \
 python-zaqarclient==2.4.0 \
 python-zunclient==4.5.0 \
+zipp==3.8.1 \
+jsonschema==4.14.0 \
+urllib3==1.26.12 \
+simplejson==3.17.6 \
+boto3==1.24.61 \
 stevedore==4.0.2
