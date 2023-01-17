@@ -6,7 +6,6 @@ bcache-tools bind9-host binfmt-support build-essential libvirt-daemon libvirt-cl
 comerr-dev conntrack conntrackd cpio cpp cpu-checker eject socat memcached \
 rabbitmq-server sharutils vim unzip sysfsutils python3-distutils python3-dev python-pip-whl pcp \
 debootstrap ovn-central ovn-common ovn-controller-vtep ovn-host golang golang-1.13 \
-mecab-ipadic mecab-ipadic-utf8 mecab-utils mysql-client-8.0 mysql-client-core-8.0 mysql-server mysql-server-8.0 mysql-server-core-8.0 \
 apparmor-utils python3-apparmor python3-libapparmor
 
 sudo rm -rf /usr/lib/python3/dist-packages/PyYAML-*.egg-info
@@ -14,6 +13,7 @@ sudo rm -rf /usr/lib/python3/dist-packages/PyYAML-*.egg-info
 # for Zed
 sudo /usr/bin/pip install \
 cliff==4.0.0 \
+cryptography==36.0.2 \
 libvirt-python==6.1.0 \
 numpy==1.23.2 \
 os-brick==6.1.0 \
@@ -53,6 +53,7 @@ ovs==2.17.1.post1 \
 wheel==0.34.2 \
 PyMySQL==1.0.2 \
 PyYAML==6.0 \
+pyOpenSSL==22.0.0 \
 python-barbicanclient==5.4.0 \
 python-blazarclient==3.5.0 \
 python-cinderclient==9.1.0 \
