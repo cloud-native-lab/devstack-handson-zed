@@ -10,6 +10,8 @@ apparmor-utils python3-apparmor python3-libapparmor
 
 sudo rm -rf /usr/lib/python3/dist-packages/PyYAML-*.egg-info
 
+wget -c https://cloud-images.ubuntu.com/releases/jammy/release-20230107/ubuntu-22.04-server-cloudimg-amd64.img -O /home/ubuntu/devstack-handson/files/ubuntu-22.04-server-cloudimg-amd64.img
+
 # for Zed
 sudo /usr/bin/pip install \
 cliff==4.0.0 \
@@ -85,4 +87,5 @@ jsonschema==4.14.0 \
 urllib3==1.26.12 \
 simplejson==3.17.6 \
 boto3==1.24.61 \
+SecretStorage===3.3.3 \
 stevedore==4.0.2
