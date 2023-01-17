@@ -4,7 +4,7 @@ sudo apt-get install -y apache2 augeas-lenses autoconf automake autopoint autoto
 bridge-utils libxen-dev qemu-slof qemu-system-arm qemu-system-mips qemu-system-misc qemu-system-ppc qemu-system-s390x qemu-system-sparc \
 bcache-tools bind9-host binfmt-support build-essential libvirt-daemon libvirt-clients libvirt-daemon-system libvirt-dev \
 comerr-dev conntrack conntrackd cpio cpp cpu-checker dstat eject socat memcached \
-rabbitmq-server sharutils vim unzip sysfsutils python3-distutils python3-dev python-pip-whl
+rabbitmq-server sharutils vim unzip sysfsutils python3-distutils python3-dev python-pip-whl pcp
 
 sudo rm -rf /usr/lib/python3/dist-packages/PyYAML-*.egg-info
 

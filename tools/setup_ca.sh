@@ -10,4 +10,4 @@ git clone --branch stable/zed https://opendev.org/openstack/requirements.git /op
 ./install_prereqs_ca.sh
 
 # Download octavia disk image
-curl -s -o /var/tmp/amphora-x64-haproxy.qcow2 https://tarballs.opendev.org/openstack/octavia/test-images/test-only-amphora-x64-haproxy-ubuntu-bionic.qcow2
+curl -s -o /var/tmp/amphora-x64-haproxy.qcow2 https://tarballs.opendev.org/openstack/octavia/test-images/test-only-amphora-x64-haproxy-ubuntu-focal.qcow2
