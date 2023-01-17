@@ -1,0 +1,14 @@
+conntrack-tools
+curl
+ebtables
+genisoimage # not:rhel9 required for config_drive
+iptables
+iputils
+kernel-modules
+kpartx
+parted
+polkit
+rabbitmq-server # NOPRIME
+sqlite
+sudo
+xorriso # not:rhel8

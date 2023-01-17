@@ -1,0 +1,638 @@
+#!/bin/bash
+#
+# lib/glance
+# Functions to control the configuration and operation of the **Glance** service
+
+# Dependencies:
+#
+# - ``functions`` file
+# - ``DEST``, ``DATA_DIR``, ``STACK_USER`` must be defined
+# - ``SERVICE_{TENANT_NAME|PASSWORD}`` must be defined
+# - ``SERVICE_HOST``
+# - ``KEYSTONE_TOKEN_FORMAT`` must be defined
+
+# ``stack.sh`` calls the entry points in this order:
+#
+# - install_glance
+# - configure_glance
+# - init_glance
+# - start_glance
+# - stop_glance
+# - cleanup_glance
+
+# Save trace setting
+_XTRACE_GLANCE=$(set +o | grep xtrace)
+set +o xtrace
+
+
+# Defaults
+# --------
+
+# Set up default directories
+GITDIR["python-glanceclient"]=$DEST/python-glanceclient
+GITDIR["glance_store"]=$DEST/glance_store
+GLANCE_DIR=$DEST/glance
+
+# Glance virtual environment
+if [[ ${USE_VENV} = True ]]; then
+    PROJECT_VENV["glance"]=${GLANCE_DIR}.venv
+    GLANCE_BIN_DIR=${PROJECT_VENV["glance"]}/bin
+else
+    GLANCE_BIN_DIR=$(get_python_exec_prefix)
+fi
+
+# Cinder for Glance
+USE_CINDER_FOR_GLANCE=$(trueorfalse False USE_CINDER_FOR_GLANCE)
+# GLANCE_CINDER_DEFAULT_BACKEND should be one of the values
+# from CINDER_ENABLED_BACKENDS
+GLANCE_CINDER_DEFAULT_BACKEND=${GLANCE_CINDER_DEFAULT_BACKEND:-lvmdriver-1}
+GLANCE_STORE_ROOTWRAP_BASE_DIR=/usr/local/etc/glance
+# NOTE (abhishekk): For opensuse data files are stored in different directory
+if is_opensuse; then
+    GLANCE_STORE_ROOTWRAP_BASE_DIR=/usr/etc/glance
+fi
+# When Cinder is used as a glance store, you can optionally configure cinder to
+# optimize bootable volume creation by allowing volumes to be cloned directly
+# in the backend instead of transferring data via Glance.  To use this feature,
+# set CINDER_ALLOWED_DIRECT_URL_SCHEMES for cinder.conf and enable
+# GLANCE_SHOW_DIRECT_URL and/or GLANCE_SHOW_MULTIPLE_LOCATIONS for Glance.  The
+# default value for both of these is False, because for some backends they
+# present a grave security risk (though not for Cinder, because all that's
+# exposed is the volume_id where the image data is stored.)  See OSSN-0065 for
+# more information: https://wiki.openstack.org/wiki/OSSN/OSSN-0065
+GLANCE_SHOW_DIRECT_URL=$(trueorfalse False GLANCE_SHOW_DIRECT_URL)
+GLANCE_SHOW_MULTIPLE_LOCATIONS=$(trueorfalse False GLANCE_SHOW_MULTIPLE_LOCATIONS)
+
+# Glance multi-store configuration
+# Boolean flag to enable multiple store configuration for glance
+GLANCE_ENABLE_MULTIPLE_STORES=$(trueorfalse False GLANCE_ENABLE_MULTIPLE_STORES)
+
+# Comma separated list for configuring multiple file stores of glance,
+# for example; GLANCE_MULTIPLE_FILE_STORES = fast,cheap,slow
+GLANCE_MULTIPLE_FILE_STORES=${GLANCE_MULTIPLE_FILE_STORES:-fast}
+
+# Default store/backend for glance, must be one of the store specified
+# in GLANCE_MULTIPLE_FILE_STORES option.
+GLANCE_DEFAULT_BACKEND=${GLANCE_DEFAULT_BACKEND:-fast}
+
+GLANCE_CACHE_DIR=${GLANCE_CACHE_DIR:=$DATA_DIR/glance/cache}
+
+# Full Glance functionality requires running in standalone mode. If we are
+# not in uwsgi mode, then we are standalone, otherwise allow separate control.
+if [[ "$WSGI_MODE" != "uwsgi" ]]; then
+    GLANCE_STANDALONE=True
+fi
+GLANCE_STANDALONE=${GLANCE_STANDALONE:-False}
+
+# File path for each store specified in GLANCE_MULTIPLE_FILE_STORES, the store
+# identifier will be appended to this path at runtime. If GLANCE_MULTIPLE_FILE_STORES
+# has fast,cheap specified then filepath will be generated like $DATA_DIR/glance/fast
+# and $DATA_DIR/glance/cheap.
+GLANCE_MULTISTORE_FILE_IMAGE_DIR=${GLANCE_MULTISTORE_FILE_IMAGE_DIR:=$DATA_DIR/glance}
+GLANCE_IMAGE_DIR=${GLANCE_IMAGE_DIR:=$DATA_DIR/glance/images}
+GLANCE_NFS_MOUNTPOINT=$GLANCE_IMAGE_DIR/mnt
+GLANCE_LOCK_DIR=${GLANCE_LOCK_DIR:=$DATA_DIR/glance/locks}
+GLANCE_STAGING_DIR=${GLANCE_MULTISTORE_FILE_IMAGE_DIR:=$DATA_DIR/os_glance_staging_store}
+GLANCE_TASKS_DIR=${GLANCE_MULTISTORE_FILE_IMAGE_DIR:=$DATA_DIR/os_glance_tasks_store}
+
+GLANCE_USE_IMPORT_WORKFLOW=$(trueorfalse False GLANCE_USE_IMPORT_WORKFLOW)
+GLANCE_ENABLE_QUOTAS=$(trueorfalse True GLANCE_ENABLE_QUOTAS)
+
+# Flag to set the oslo_policy.enforce_scope. This is used to switch
+# the Image API policies to start checking the scope of token. By Default,
+# this flag is False.
+# For more detail: https://docs.openstack.org/oslo.policy/latest/configuration/index.html#oslo_policy.enforce_scope
+GLANCE_ENFORCE_SCOPE=$(trueorfalse False GLANCE_ENFORCE_SCOPE)
+
+GLANCE_CONF_DIR=${GLANCE_CONF_DIR:-/etc/glance}
+GLANCE_METADEF_DIR=$GLANCE_CONF_DIR/metadefs
+GLANCE_API_CONF=$GLANCE_CONF_DIR/glance-api.conf
+GLANCE_API_PASTE_INI=$GLANCE_CONF_DIR/glance-api-paste.ini
+GLANCE_CACHE_CONF=$GLANCE_CONF_DIR/glance-cache.conf
+GLANCE_SCHEMA_JSON=$GLANCE_CONF_DIR/schema-image.json
+GLANCE_SWIFT_STORE_CONF=$GLANCE_CONF_DIR/glance-swift-store.conf
+GLANCE_IMAGE_IMPORT_CONF=$GLANCE_CONF_DIR/glance-image-import.conf
+
+if is_service_enabled tls-proxy; then
+    GLANCE_SERVICE_PROTOCOL="https"
+fi
+
+# Glance connection info.  Note the port must be specified.
+GLANCE_SERVICE_HOST=${GLANCE_SERVICE_HOST:-$SERVICE_HOST}
+GLANCE_SERVICE_LISTEN_ADDRESS=${GLANCE_SERVICE_LISTEN_ADDRESS:-$(ipv6_unquote $SERVICE_LISTEN_ADDRESS)}
+GLANCE_SERVICE_PORT=${GLANCE_SERVICE_PORT:-9292}
+GLANCE_SERVICE_PORT_INT=${GLANCE_SERVICE_PORT_INT:-19292}
+GLANCE_HOSTPORT=${GLANCE_HOSTPORT:-$GLANCE_SERVICE_HOST:$GLANCE_SERVICE_PORT}
+GLANCE_SERVICE_PROTOCOL=${GLANCE_SERVICE_PROTOCOL:-$SERVICE_PROTOCOL}
+GLANCE_UWSGI=$GLANCE_BIN_DIR/glance-wsgi-api
+GLANCE_UWSGI_CONF=$GLANCE_CONF_DIR/glance-uwsgi.ini
+
+# Glance default limit for Devstack
+GLANCE_LIMIT_IMAGE_SIZE_TOTAL=${GLANCE_LIMIT_IMAGE_SIZE_TOTAL:-1000}
+
+# If wsgi mode is uwsgi run glance under uwsgi, else default to eventlet
+# TODO(mtreinish): Remove the eventlet path here and in all the similar
+# conditionals below after the Pike release
+if [[ "$WSGI_MODE" == "uwsgi" ]]; then
+    GLANCE_URL="$GLANCE_SERVICE_PROTOCOL://$GLANCE_SERVICE_HOST/image"
+else
+    GLANCE_URL="$GLANCE_SERVICE_PROTOCOL://$GLANCE_HOSTPORT"
+fi
+
+# Functions
+# ---------
+
+# Test if any Glance services are enabled
+# is_glance_enabled
+function is_glance_enabled {
+    [[ ,${DISABLED_SERVICES} =~ ,"glance" ]] && return 1
+    [[ ,${ENABLED_SERVICES} =~ ,"g-" ]] && return 0
+    return 1
+}
+
+# cleanup_glance() - Remove residual data files, anything left over from previous
+# runs that a clean run would need to clean up
+function cleanup_glance {
+    # delete image files (glance) and all of the glance-remote temporary
+    # storage
+    sudo rm -rf $GLANCE_CACHE_DIR $GLANCE_IMAGE_DIR "${DATA_DIR}/glance-remote"
+
+    # Cleanup multiple stores directories
+    if [[ "$GLANCE_ENABLE_MULTIPLE_STORES" == "True" ]]; then
+        local store file_dir
+        for store in $(echo $GLANCE_MULTIPLE_FILE_STORES | tr "," "\n"); do
+            file_dir="${GLANCE_MULTISTORE_FILE_IMAGE_DIR}/${store}/"
+            sudo rm -rf $file_dir
+        done
+
+        # Cleanup reserved stores directories
+        sudo rm -rf $GLANCE_STAGING_DIR $GLANCE_TASKS_DIR
+    fi
+}
+
+# Set multiple cinder store related config options for each of the cinder store
+#
+function configure_multiple_cinder_stores {
+
+    local be be_name be_type enabled_backends
+    for be in ${CINDER_ENABLED_BACKENDS//,/ }; do
+        be_type=${be%%:*}
+        be_name=${be##*:}
+        enabled_backends+="${be_name}:cinder,"
+
+        set_common_cinder_store_params $be_name
+        iniset $GLANCE_API_CONF $be_name cinder_volume_type ${be_name}
+        if [[ "$be_type" == "nfs" ]]; then
+            mkdir -p "$GLANCE_NFS_MOUNTPOINT"
+            iniset $GLANCE_API_CONF $be_name cinder_mount_point_base "$GLANCE_NFS_MOUNTPOINT"
+        fi
+    done
+    iniset $GLANCE_API_CONF DEFAULT enabled_backends ${enabled_backends::-1}
+    iniset $GLANCE_API_CONF glance_store default_backend $GLANCE_CINDER_DEFAULT_BACKEND
+}
+
+# Set common cinder store options to given config section
+#
+# Arguments:
+# config_section
+#
+function set_common_cinder_store_params {
+    local config_section="$1"
+    iniset $GLANCE_API_CONF $config_section cinder_store_auth_address $KEYSTONE_SERVICE_URI_V3
+    iniset $GLANCE_API_CONF $config_section cinder_store_user_name glance
+    iniset $GLANCE_API_CONF $config_section cinder_store_password $SERVICE_PASSWORD
+    iniset $GLANCE_API_CONF $config_section cinder_store_project_name $SERVICE_PROJECT_NAME
+}
+
+# Configure multiple file stores options for each file store
+#
+# Arguments:
+#
+function configure_multiple_file_stores {
+    local store enabled_backends
+    enabled_backends=""
+    for store in $(echo $GLANCE_MULTIPLE_FILE_STORES | tr "," "\n"); do
+        enabled_backends+="${store}:file,"
+    done
+    iniset $GLANCE_API_CONF DEFAULT enabled_backends ${enabled_backends::-1}
+
+    # Glance multiple store Store specific configs
+    iniset $GLANCE_API_CONF glance_store default_backend $GLANCE_DEFAULT_BACKEND
+    local store
+    for store in $(echo $glance_multiple_file_stores | tr "," "\n"); do
+        iniset $GLANCE_API_CONF $store filesystem_store_datadir "${GLANCE_MULTISTORE_FILE_IMAGE_DIR}/${store}/"
+    done
+}
+
+# Set reserved stores for glance
+function configure_reserved_stores {
+    iniset $GLANCE_API_CONF os_glance_staging_store filesystem_store_datadir "${GLANCE_MULTISTORE_FILE_IMAGE_DIR}/os_glance_staging_store/"
+    iniset $GLANCE_API_CONF os_glance_tasks_store filesystem_store_datadir "${GLANCE_MULTISTORE_FILE_IMAGE_DIR}/os_glance_tasks_store/"
+}
+
+# Copy rootwrap file from glance_store/etc/glance to /etc/glance
+#
+# Arguments:
+# source_path Source path to copy rootwrap files from
+#
+function copy_rootwrap {
+    local source_path="$1"
+    # Make glance configuration directory if it is not exists
+    sudo install -d -o $STACK_USER $GLANCE_CONF_DIR
+    cp -r $source_path/rootwrap.* $GLANCE_CONF_DIR/
+}
+
+# Set glance_store related config options
+#
+# Arguments:
+# USE_CINDER_FOR_GLANCE
+# GLANCE_ENABLE_MULTIPLE_STORES
+#
+function configure_glance_store {
+    local use_cinder_for_glance="$1"
+    local glance_enable_multiple_stores="$2"
+    local be
+
+    if [[ "$glance_enable_multiple_stores" == "False" ]]; then
+        # Configure traditional glance_store
+        if [[ "$use_cinder_for_glance" == "True" ]]; then
+            # set common glance_store parameters
+            iniset $GLANCE_API_CONF glance_store stores "cinder,file,http"
+            iniset $GLANCE_API_CONF glance_store default_store cinder
+
+            # set cinder related store parameters
+            set_common_cinder_store_params glance_store
+            # set nfs mount_point dir
+            for be in ${CINDER_ENABLED_BACKENDS//,/ }; do
+                local be_name=${be##*:}
+                if [[ "$be_name" == "nfs" ]]; then
+                    mkdir -p $GLANCE_NFS_MOUNTPOINT
+                    iniset $GLANCE_API_CONF glance_store cinder_mount_point_base $GLANCE_NFS_MOUNTPOINT
+                fi
+            done
+        fi
+        # Store specific configs
+        iniset $GLANCE_API_CONF glance_store filesystem_store_datadir $GLANCE_IMAGE_DIR/
+    else
+        if [[ "$use_cinder_for_glance" == "True" ]]; then
+            # Configure multiple cinder stores for glance
+            configure_multiple_cinder_stores
+        else
+            # Configure multiple file stores for glance
+            configure_multiple_file_stores
+        fi
+        # Configure reserved stores
+        configure_reserved_stores
+    fi
+}
+
+function configure_glance_quotas {
+
+    # Registered limit resources in keystone are system-specific resources.
+    # Make sure we use a system-scoped token to interact with this API.
+
+    openstack --os-cloud devstack-system-admin registered limit create --service glance \
+        --default-limit $GLANCE_LIMIT_IMAGE_SIZE_TOTAL --region $REGION_NAME image_size_total
+    openstack --os-cloud devstack-system-admin registered limit create --service glance \
+        --default-limit $GLANCE_LIMIT_IMAGE_SIZE_TOTAL --region $REGION_NAME image_stage_total
+    openstack --os-cloud devstack-system-admin registered limit create --service glance \
+        --default-limit 100 --region $REGION_NAME image_count_total
+    openstack --os-cloud devstack-system-admin registered limit create --service glance \
+        --default-limit 100 --region $REGION_NAME image_count_uploading
+
+    # Tell glance to use these limits
+    iniset $GLANCE_API_CONF DEFAULT use_keystone_limits True
+
+    # Configure oslo_limit so it can talk to keystone
+    iniset $GLANCE_API_CONF oslo_limit user_domain_name $SERVICE_DOMAIN_NAME
+    iniset $GLANCE_API_CONF oslo_limit password $SERVICE_PASSWORD
+    iniset $GLANCE_API_CONF oslo_limit username glance
+    iniset $GLANCE_API_CONF oslo_limit auth_type password
+    iniset $GLANCE_API_CONF oslo_limit auth_url $KEYSTONE_SERVICE_URI
+    iniset $GLANCE_API_CONF oslo_limit system_scope all
+    iniset $GLANCE_API_CONF oslo_limit endpoint_id \
+           $(openstack --os-cloud devstack-system-admin endpoint list --service glance -f value -c ID)
+
+    # Allow the glance service user to read quotas
+    openstack --os-cloud devstack-system-admin role add --user glance \
+        --user-domain $SERVICE_DOMAIN_NAME --system all reader
+}
+
+# configure_glance() - Set config files, create data dirs, etc
+function configure_glance {
+    sudo install -d -o $STACK_USER $GLANCE_CONF_DIR $GLANCE_METADEF_DIR
+
+    # Set non-default configuration options for the API server
+    local dburl
+    dburl=`database_connection_url glance`
+
+    iniset $GLANCE_API_CONF DEFAULT debug $ENABLE_DEBUG_LOG_LEVEL
+    iniset $GLANCE_API_CONF database connection $dburl
+    iniset $GLANCE_API_CONF DEFAULT use_syslog $SYSLOG
+    iniset $GLANCE_API_CONF DEFAULT image_cache_dir $GLANCE_CACHE_DIR/
+    iniset $GLANCE_API_CONF oslo_concurrency lock_path $GLANCE_LOCK_DIR
+    iniset $GLANCE_API_CONF paste_deploy flavor keystone+cachemanagement
+    configure_keystone_authtoken_middleware $GLANCE_API_CONF glance
+    iniset $GLANCE_API_CONF oslo_messaging_notifications driver messagingv2
+    iniset_rpc_backend glance $GLANCE_API_CONF
+    if [ "$VIRT_DRIVER" = 'libvirt' ] && [ "$LIBVIRT_TYPE" = 'parallels' ]; then
+        iniset $GLANCE_API_CONF DEFAULT disk_formats "ami,ari,aki,vhd,vmdk,raw,qcow2,vdi,iso,ploop"
+    fi
+    # Only use these if you know what you are doing!  See OSSN-0065
+    iniset $GLANCE_API_CONF DEFAULT show_image_direct_url $GLANCE_SHOW_DIRECT_URL
+    iniset $GLANCE_API_CONF DEFAULT show_multiple_locations $GLANCE_SHOW_MULTIPLE_LOCATIONS
+
+    # Configure glance_store
+    configure_glance_store $USE_CINDER_FOR_GLANCE $GLANCE_ENABLE_MULTIPLE_STORES
+
+    # CORS feature support - to allow calls from Horizon by default
+    if [ -n "$GLANCE_CORS_ALLOWED_ORIGIN" ]; then
+        iniset $GLANCE_API_CONF cors allowed_origin "$GLANCE_CORS_ALLOWED_ORIGIN"
+    else
+        iniset $GLANCE_API_CONF cors allowed_origin "http://$SERVICE_HOST"
+    fi
+
+    # No multiple stores for swift yet
+    if [[ "$GLANCE_ENABLE_MULTIPLE_STORES" == "False" ]]; then
+        # Store the images in swift if enabled.
+        if is_service_enabled s-proxy; then
+            iniset $GLANCE_API_CONF glance_store default_store swift
+            iniset $GLANCE_API_CONF glance_store swift_store_create_container_on_put True
+
+            iniset $GLANCE_API_CONF glance_store swift_store_config_file $GLANCE_SWIFT_STORE_CONF
+            iniset $GLANCE_API_CONF glance_store default_swift_reference ref1
+            iniset $GLANCE_API_CONF glance_store stores "file, http, swift"
+            if is_service_enabled tls-proxy; then
+                iniset $GLANCE_API_CONF glance_store swift_store_cacert $SSL_BUNDLE_FILE
+            fi
+            iniset $GLANCE_API_CONF DEFAULT graceful_shutdown_timeout "$SERVICE_GRACEFUL_SHUTDOWN_TIMEOUT"
+
+            iniset $GLANCE_SWIFT_STORE_CONF ref1 user $SERVICE_PROJECT_NAME:glance-swift
+
+            iniset $GLANCE_SWIFT_STORE_CONF ref1 key $SERVICE_PASSWORD
+            iniset $GLANCE_SWIFT_STORE_CONF ref1 auth_address $KEYSTONE_SERVICE_URI/v3
+            iniset $GLANCE_SWIFT_STORE_CONF ref1 auth_version 3
+        fi
+    fi
+
+    # We need to tell glance what it's public endpoint is so that the version
+    # discovery document will be correct
+    iniset $GLANCE_API_CONF DEFAULT public_endpoint $GLANCE_URL
+
+    if is_service_enabled tls-proxy; then
+        iniset $GLANCE_API_CONF DEFAULT bind_port $GLANCE_SERVICE_PORT_INT
+        iniset $GLANCE_API_CONF keystone_authtoken identity_uri $KEYSTONE_SERVICE_URI
+    fi
+
+    # Format logging
+    setup_logging $GLANCE_API_CONF
+
+    cp -p $GLANCE_DIR/etc/glance-api-paste.ini $GLANCE_API_PASTE_INI
+
+    # Set non-default configuration options for the glance-cache
+    iniset $GLANCE_CACHE_CONF DEFAULT debug $ENABLE_DEBUG_LOG_LEVEL
+    iniset $GLANCE_CACHE_CONF DEFAULT use_syslog $SYSLOG
+    iniset $GLANCE_CACHE_CONF DEFAULT image_cache_dir $GLANCE_CACHE_DIR/
+    iniset $GLANCE_CACHE_CONF DEFAULT auth_url $KEYSTONE_SERVICE_URI
+    iniset $GLANCE_CACHE_CONF DEFAULT admin_tenant_name $SERVICE_PROJECT_NAME
+    iniset $GLANCE_CACHE_CONF DEFAULT admin_user glance
+    iniset $GLANCE_CACHE_CONF DEFAULT admin_password $SERVICE_PASSWORD
+
+    # Store specific confs
+    iniset $GLANCE_CACHE_CONF glance_store filesystem_store_datadir $GLANCE_IMAGE_DIR/
+
+    # Set default configuration options for the glance-image-import
+    iniset $GLANCE_IMAGE_IMPORT_CONF image_import_opts image_import_plugins []
+    iniset $GLANCE_IMAGE_IMPORT_CONF inject_metadata_properties ignore_user_roles admin
+    iniset $GLANCE_IMAGE_IMPORT_CONF inject_metadata_properties inject
+
+    cp -p $GLANCE_DIR/etc/schema-image.json $GLANCE_SCHEMA_JSON
+
+    cp -p $GLANCE_DIR/etc/metadefs/*.json $GLANCE_METADEF_DIR
+
+    if is_service_enabled tls-proxy; then
+        CINDER_SERVICE_HOST=${CINDER_SERVICE_HOST:-$SERVICE_HOST}
+        CINDER_SERVICE_PORT=${CINDER_SERVICE_PORT:-8776}
+
+        iniset $GLANCE_API_CONF DEFAULT cinder_endpoint_template "https://$CINDER_SERVICE_HOST:$CINDER_SERVICE_PORT/v3/%(project_id)s"
+        iniset $GLANCE_CACHE_CONF DEFAULT cinder_endpoint_template "https://$CINDER_SERVICE_HOST:$CINDER_SERVICE_PORT/v3/%(project_id)s"
+    fi
+
+    if [[ "$GLANCE_STANDALONE" == False ]]; then
+        write_local_uwsgi_http_config "$GLANCE_UWSGI_CONF" "$GLANCE_UWSGI" "/image"
+        # Grab our uwsgi listen address and use that to fill out our
+        # worker_self_reference_url config
+        iniset $GLANCE_API_CONF DEFAULT worker_self_reference_url \
+               $(awk '-F= ' '/^http-socket/ { print "http://"$2}' \
+                    $GLANCE_UWSGI_CONF)
+    else
+        write_local_proxy_http_config glance "http://$GLANCE_SERVICE_HOST:$GLANCE_SERVICE_PORT_INT" "/image"
+        iniset $GLANCE_API_CONF DEFAULT bind_host $GLANCE_SERVICE_LISTEN_ADDRESS
+        iniset $GLANCE_API_CONF DEFAULT bind_port $GLANCE_SERVICE_PORT_INT
+        iniset $GLANCE_API_CONF DEFAULT workers "$API_WORKERS"
+    fi
+
+    if [[ "$GLANCE_ENFORCE_SCOPE" == True || "$ENFORCE_SCOPE" == True ]] ; then
+        iniset $GLANCE_API_CONF oslo_policy enforce_scope true
+        iniset $GLANCE_API_CONF oslo_policy enforce_new_defaults true
+        iniset $GLANCE_API_CONF DEFAULT enforce_secure_rbac true
+    fi
+}
+
+# create_glance_accounts() - Set up common required glance accounts
+
+# Project              User            Roles
+# ---------------------------------------------------------------------
+# SERVICE_PROJECT_NAME  glance          service
+# SERVICE_PROJECT_NAME  glance-swift    ResellerAdmin (if Swift is enabled)
+# SERVICE_PROJECT_NAME  glance-search   search (if Search is enabled)
+
+function create_glance_accounts {
+    if is_service_enabled g-api; then
+
+        create_service_user "glance"
+
+        # required for swift access
+        if is_service_enabled s-proxy; then
+            create_service_user "glance-swift" "ResellerAdmin"
+        fi
+
+        get_or_create_service "glance" "image" "Glance Image Service"
+        get_or_create_endpoint \
+            "image" \
+            "$REGION_NAME" \
+            "$GLANCE_URL"
+
+        # Note(frickler): Crude workaround for https://bugs.launchpad.net/glance-store/+bug/1620999
+        service_domain_id=$(get_or_create_domain $SERVICE_DOMAIN_NAME)
+        iniset $GLANCE_SWIFT_STORE_CONF ref1 project_domain_id $service_domain_id
+        iniset $GLANCE_SWIFT_STORE_CONF ref1 user_domain_id $service_domain_id
+
+        if [[ "$GLANCE_ENABLE_QUOTAS" = True ]]; then
+            configure_glance_quotas
+        fi
+
+    fi
+}
+
+# init_glance() - Initialize databases, etc.
+function init_glance {
+    # Delete existing images
+    rm -rf $GLANCE_IMAGE_DIR
+    mkdir -p $GLANCE_IMAGE_DIR
+
+    # (Re)create glance database
+    recreate_database glance
+
+    time_start "dbsync"
+    # Migrate glance database
+    $GLANCE_BIN_DIR/glance-manage --config-file $GLANCE_CONF_DIR/glance-api.conf db_sync
+
+    # Load metadata definitions
+    $GLANCE_BIN_DIR/glance-manage --config-file $GLANCE_CONF_DIR/glance-api.conf db_load_metadefs
+    time_stop "dbsync"
+}
+
+# install_glanceclient() - Collect source and prepare
+function install_glanceclient {
+    if use_library_from_git "python-glanceclient"; then
+        git_clone_by_name "python-glanceclient"
+        setup_dev_lib "python-glanceclient"
+        sudo install -D -m 0644 -o $STACK_USER {${GITDIR["python-glanceclient"]}/tools/,/etc/bash_completion.d/}glance.bash_completion
+    fi
+}
+
+# install_glance() - Collect source and prepare
+function install_glance {
+    local glance_store_extras=()
+
+    if is_service_enabled cinder; then
+        glance_store_extras=("cinder" "${glance_store_extras[@]}")
+    fi
+
+    if is_service_enabled swift; then
+        glance_store_extras=("swift" "${glance_store_extras[@]}")
+    fi
+
+    # Install glance_store from git so we make sure we're testing
+    # the latest code.
+    if use_library_from_git "glance_store"; then
+        git_clone_by_name "glance_store"
+        setup_dev_lib "glance_store" $(join_extras "${glance_store_extras[@]}")
+        copy_rootwrap ${DEST}/glance_store/etc/glance
+    else
+        # we still need to pass extras
+        pip_install_gr_extras glance-store $(join_extras "${glance_store_extras[@]}")
+        copy_rootwrap $GLANCE_STORE_ROOTWRAP_BASE_DIR
+    fi
+
+    git_clone $GLANCE_REPO $GLANCE_DIR $GLANCE_BRANCH
+
+    setup_develop $GLANCE_DIR
+}
+
+# glance_remote_conf() - Return the path to an alternate config file for
+#                        the remote glance clone
+function glance_remote_conf {
+    echo $(dirname "${GLANCE_CONF_DIR}")/glance-remote/$(basename "$1")
+}
+
+# start_glance_remote_clone() - Clone the regular glance api worker
+function start_glance_remote_clone {
+    local glance_remote_conf_dir glance_remote_port remote_data
+    local glance_remote_uwsgi
+
+    glance_remote_conf_dir="$(glance_remote_conf "")"
+    glance_remote_port=$(get_random_port)
+    glance_remote_uwsgi="$(glance_remote_conf $GLANCE_UWSGI_CONF)"
+
+    # Clone the existing ready-to-go glance-api setup
+    sudo rm -Rf "$glance_remote_conf_dir"
+    sudo cp -r "$GLANCE_CONF_DIR" "$glance_remote_conf_dir"
+    sudo chown $STACK_USER -R "$glance_remote_conf_dir"
+
+    # Point this worker at different data dirs
+    remote_data="${DATA_DIR}/glance-remote"
+    mkdir -p $remote_data/os_glance_tasks_store \
+          "${remote_data}/os_glance_staging_store"
+    iniset $(glance_remote_conf "$GLANCE_API_CONF") os_glance_staging_store \
+           filesystem_store_datadir "${remote_data}/os_glance_staging_store"
+    iniset $(glance_remote_conf "$GLANCE_API_CONF") os_glance_tasks_store \
+           filesystem_store_datadir "${remote_data}/os_glance_tasks_store"
+
+    # Point this worker to use different cache dir
+    mkdir -p "$remote_data/cache"
+    iniset $(glance_remote_conf "$GLANCE_API_CONF") DEFAULT \
+           image_cache_dir "${remote_data}/cache"
+
+    # Change our uwsgi to our new port
+    sed -ri "s/^(http-socket.*):[0-9]+/\1:$glance_remote_port/" \
+        "$glance_remote_uwsgi"
+
+    # Update the self-reference url with our new port
+    iniset $(glance_remote_conf $GLANCE_API_CONF) DEFAULT \
+           worker_self_reference_url \
+           $(awk '-F= ' '/^http-socket/ { print "http://"$2 }' \
+                    "$glance_remote_uwsgi")
+
+    # We need to create the systemd service for the clone, but then
+    # change it to include an Environment line to point the WSGI app
+    # at the alternate config directory.
+    write_uwsgi_user_unit_file devstack@g-api-r.service "$(which uwsgi) \
+                               --procname-prefix \
+                               glance-api-remote \
+                               --ini $glance_remote_uwsgi" \
+                               "" "$STACK_USER"
+    iniset -sudo ${SYSTEMD_DIR}/devstack@g-api-r.service \
+           "Service" "Environment" \
+           "OS_GLANCE_CONFIG_DIR=$glance_remote_conf_dir"
+
+    # Reload and restart with the new config
+    $SYSTEMCTL daemon-reload
+    $SYSTEMCTL restart devstack@g-api-r
+
+    get_or_create_service glance_remote image_remote "Alternate glance"
+    get_or_create_endpoint image_remote $REGION_NAME \
+                $(awk '-F= ' '/^http-socket/ { print "http://"$2 }' \
+                    $glance_remote_uwsgi)
+}
+
+# start_glance() - Start running processes
+function start_glance {
+    local service_protocol=$GLANCE_SERVICE_PROTOCOL
+    if is_service_enabled tls-proxy; then
+        if [[ "$WSGI_MODE" != "uwsgi" ]]; then
+            start_tls_proxy glance-service '*' $GLANCE_SERVICE_PORT $GLANCE_SERVICE_HOST $GLANCE_SERVICE_PORT_INT
+        fi
+    fi
+
+    if [[ "$GLANCE_STANDALONE" == False ]]; then
+        run_process g-api "$(which uwsgi) --procname-prefix glance-api --ini $GLANCE_UWSGI_CONF"
+    else
+        run_process g-api "$GLANCE_BIN_DIR/glance-api --config-dir=$GLANCE_CONF_DIR"
+    fi
+
+    if is_service_enabled g-api-r; then
+        echo "Starting the g-api-r clone service..."
+        start_glance_remote_clone
+    fi
+
+    echo "Waiting for g-api ($GLANCE_SERVICE_HOST) to start..."
+    if ! wait_for_service $SERVICE_TIMEOUT $GLANCE_URL; then
+        die $LINENO "g-api did not start"
+    fi
+}
+
+# stop_glance() - Stop running processes
+function stop_glance {
+    stop_process g-api
+    stop_process g-api-r
+}
+
+# Restore xtrace
+$_XTRACE_GLANCE
+
+# Tell emacs to use shell-script-mode
+## Local variables:
+## mode: shell-script
+## End:

@@ -1,0 +1,4 @@
+- hosts: all
+  roles:
+    - get-devstack-os-environment
+    - tox

@@ -1,0 +1,4 @@
+lvm2
+qemu-utils
+tgt # NOPRIME
+thin-provisioning-tools

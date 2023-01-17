@@ -1,0 +1,21 @@
+conntrack
+curl
+ebtables
+genisoimage # required for config_drive
+iptables
+iputils-arping
+kpartx
+libjs-jquery-tablesorter # Needed for coverage html reports
+libvirt-clients # NOPRIME
+libvirt-daemon-system # NOPRIME
+libvirt-dev # NOPRIME
+mysql-server # NOPRIME
+parted
+pm-utils
+python3-mysqldb
+qemu-kvm # NOPRIME
+rabbitmq-server # NOPRIME
+socat # used by ajaxterm
+sqlite3
+sudo
+vlan
