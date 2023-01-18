@@ -28,3 +28,6 @@ git clone --depth 1 --branch ${BRANCH} https://opendev.org/openstack/octavia /op
 git clone --depth 1 --branch ${BRANCH} https://opendev.org/openstack/octavia-dashboard /opt/stack/octavia-dashboard
 git clone --depth 1 --branch ${BRANCH} https://opendev.org/openstack/ovn-octavia-provider /opt/stack/ovn-octavia-provider
 git clone --depth 1 --branch ${BRANCH} https://opendev.org/openstack/barbican /opt/stack/barbican
+
+# TZ
+sudo timedatectl set-timezone Asia/Tokyo
